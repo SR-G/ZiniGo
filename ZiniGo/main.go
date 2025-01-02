@@ -5,12 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/icza/gox/stringsx"
-	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
-	"io/ioutil"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -20,6 +15,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/icza/gox/stringsx"
+	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type Response struct {
@@ -30,6 +31,35 @@ type Response struct {
 type Data struct {
 	Source string `json:"src"`
 	Index  string `json:"index"`
+}
+
+func RemoveExtraPages(filename string, conf *model.Configuration) error {
+	err := api.RemovePagesFile(filename, "", []string{"2-"}, nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "please provide the correct password") {
+			// Try again with password
+			err = api.RemovePagesFile(filename, "", []string{"2-"}, conf)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func RemoveKeywords(filename string, conf *model.Configuration) error {
+	err := api.RemoveKeywordsFile(filename, "", nil, nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "please provide the correct password") {
+			err = api.RemoveKeywordsFile(filename, "", nil, conf)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func main() {
@@ -51,7 +81,7 @@ func main() {
 
 	if fileExists(mydir + "/config.json") {
 		fmt.Println("Config file loaded")
-		byteValue, _ := ioutil.ReadFile("config.json")
+		byteValue, _ := os.ReadFile("config.json")
 		username := gjson.GetBytes(byteValue, "username")
 		if username.Exists() {
 			*usernamePtr = username.String()
@@ -78,7 +108,7 @@ func main() {
 			fmt.Println("No fingerprint found in text file, generating and writing")
 			newJson, _ := sjson.Set(string(byteValue), "fingerprint", randSeq(15))
 
-			err := ioutil.WriteFile("config.json", []byte(newJson), 0644)
+			err := os.WriteFile("config.json", []byte(newJson), 0644)
 			if err != nil {
 				log.Fatalf("unable to write file: %v", err)
 			}
@@ -100,7 +130,7 @@ func main() {
 
 		fmt.Println("Loading HTML template")
 		defaultTemplate := GetDefaultTemplate()
-		template, _ := ioutil.ReadFile("template.html")
+		template, _ := os.ReadFile("template.html")
 
 		if template == nil || len(template) == 0 {
 			fmt.Println("template.html not found, or empty. using issue in template. Consider changing this if your files are cropped.")
@@ -111,7 +141,7 @@ func main() {
 		//fmt.Println("Grabbing list of pages...")
 		issueDirectory := filepath.Join(mydir, "issue")
 		if _, err := os.Stat(issueDirectory); os.IsNotExist(err) {
-			os.Mkdir(issueDirectory, 0600)
+			os.Mkdir(issueDirectory, 0755)
 		}
 
 		for _, issue := range issueList.Data {
@@ -139,19 +169,20 @@ func main() {
 			pages := GetPages(loginToken, issue, *zinioHostPtr)
 
 			var filenames []string
-			conf := pdfcpu.NewAESConfiguration(passwordToUse, passwordToUse, 256)
-			for i := 0; i < len(pages.Data); i++ {
-				if len(pages.Data[i].Src) == 0 {
+			conf := model.NewAESConfiguration(passwordToUse, passwordToUse, 256)
+			conf.ValidationMode = model.ValidationRelaxed
+			for i := 0; i < len(pages.Data.Pages); i++ {
+				if len(pages.Data.Pages[i].Src) == 0 {
 
 					fmt.Println("No Download URL for page ", i)
 					continue
 				}
-				fmt.Println("Source ", pages.Data[i].Src)
-				fmt.Println("ID: ", pages.Data[i].Index)
+				fmt.Println("Source ", pages.Data.Pages[i].Src)
+				fmt.Println("ID: ", pages.Data.Pages[i].Index)
 
-				pathString := issuePath + "_" + pages.Data[i].Index
+				pathString := issuePath + "_" + pages.Data.Pages[i].Index
 
-				resp, err := http.Get(pages.Data[i].Src)
+				resp, err := http.Get(pages.Data.Pages[i].Src)
 				// handle the error if there is one
 				if err != nil {
 					panic(err)
@@ -159,12 +190,29 @@ func main() {
 				// do this now so it won't be forgotten
 				defer resp.Body.Close()
 				// reads html as a slice of bytes
-				html, err := ioutil.ReadAll(resp.Body)
+				html, err := io.ReadAll(resp.Body)
 				if err != nil {
 					panic(err)
 				}
-				ioutil.WriteFile(pathString+".pdf", html, 0644)
-				api.DecryptFile(pathString+".pdf", "", conf)
+				os.WriteFile(pathString+".pdf", html, 0644)
+				err = api.DecryptFile(pathString+".pdf", "", conf)
+				if err != nil {
+					if strings.Contains(err.Error(), "invalid date") {
+						err = RemoveKeywords(pathString+".pdf", conf)
+						if err != nil {
+							fmt.Printf("Removing keywords from ["+filenames[i]+"] failed during decrypt with %s\n.", err)
+						} else {
+							// Try again decrypt
+							// pdfcpu: validateDateEntry: <D:-001-1-1-1-1-1-00'30'> invalid date
+							err = api.DecryptFile(pathString+".pdf", "", conf)
+							if err != nil {
+								fmt.Println("Can't decrypt ["+pathString+".pdf] (even after keywords removal) : ", err)
+							}
+						}
+					} else {
+						fmt.Println("Can't decrypt ["+pathString+".pdf] : ", err)
+					}
+				}
 
 				filenames = append(filenames, pathString+".pdf")
 			}
@@ -172,17 +220,67 @@ func main() {
 			for i := range filenames {
 				//remove last page
 
-				err = retry(5, 2*time.Second, func() (err error) {
-					err = api.RemovePagesFile(filenames[i], "", []string{"2-"}, nil)
-					if err != nil {
-						fmt.Printf("Removing extra pages failed with %s\n.", err)
-					}
+				/*
+					err = retry(5, 2*time.Second, func() (err error) {
+						err = api.RemovePagesFile(filenames[i], "", []string{"2-"}, nil)
+						if err != nil {
+							fmt.Printf("Removing extra pages failed with %s\n.", err)
+							err = api.RemovePagesFile(filenames[i], "", []string{"2-"}, conf)
+						}
 
-					return
-				})
+						return
+					})
+				*/
+
+				/*
+					err = RemoveExtraPages(filenames[i], conf)
+					if err != nil {
+						if strings.Contains(err.Error(), "invalid date") {
+							// Try to remove all metadata and then to clean up pages again
+							err = RemoveKeywords(filenames[i], conf)
+							if err != nil {
+								fmt.Printf("Removing keywords from ["+filenames[i]+"] still failed with %s\n.", err)
+							} else {
+								err = RemoveExtraPages(filenames[i], conf)
+								if err != nil {
+									fmt.Printf("Removing extra pages from ["+filenames[i]+"] still failed (after keywords removal) with %s\n.", err)
+									os.Exit(1)
+								}
+							}
+						} else {
+							fmt.Printf("Removing extra pages from ["+filenames[i]+"] failed with %s\n.", err)
+						}
+					}
+				*/
+
+				err = api.RemovePagesFile(filenames[i], "", []string{"2-"}, conf)
+				if err != nil {
+					fmt.Printf("Removing extra pages from ["+filenames[i]+"] failed with %s\n.", err)
+				}
+
 			}
 
-			_ = api.MergeCreateFile(filenames, completeName, nil)
+			err = api.MergeCreateFile(filenames, completeName, false, nil)
+			if err != nil {
+				fmt.Println("Can't concatane all pages", err)
+				os.Exit(1)
+			}
+
+			// inFile, outFile string, selectedPages, ids []string, objNrs []int, conf *pdfcpu.Configuration, incr bool
+			err2 := api.RemoveAnnotationsFile(completeName, "", nil, nil, nil, nil, false)
+			if err2 != nil {
+				fmt.Println(err2)
+			}
+
+			err2 = api.SetPageLayoutFile(completeName, "", model.PageLayoutTwoPageLeft, nil)
+			if err2 != nil {
+				fmt.Println(err2)
+			}
+
+			err2 = api.SetPageModeFile(completeName, "", model.PageModeUseThumbs, nil)
+			if err2 != nil {
+				fmt.Println(err2)
+			}
 
 			for _, fileName := range filenames {
 				_ = os.Remove(fileName)
@@ -207,7 +305,7 @@ func GetIssueDetails(userToken LoginResponse, id int) IssueDetails {
 	}
 
 	resp, _ := client.Do(req)
-	data, _ := ioutil.ReadAll(resp.Body)
+	data, _ := io.ReadAll(resp.Body)
 
 	responseType := IssueDetails{}
 
@@ -216,11 +314,11 @@ func GetIssueDetails(userToken LoginResponse, id int) IssueDetails {
 	return responseType
 }
 
-func GetPages(userToken LoginResponse, issue LibraryData, endpoint string) AutoGenerated {
+func GetPages(userToken LoginResponse, issue LibraryData, endpoint string) IssueDetails {
 
 	client := &http.Client{}
 
-	req, _ := http.NewRequest("GET", "https://zinio.com/api/newsstand/newsstands/101/issues/"+strconv.Itoa(issue.Id)+"/content/pages?format=pdf&application_id=9901&css_content=true&user_id="+userToken.Data.User.UserIDString, nil)
+	req, _ := http.NewRequest("GET", "https://zinio.com/api/reader/content?issue_id="+strconv.Itoa(issue.Id)+"&newsstand_id=101&user_id="+userToken.Data.User.UserIDString, nil)
 
 	req.Header.Add("Content-Type", "application/json")
 	for _, cookie := range userToken.Data.Cookies {
@@ -229,9 +327,9 @@ func GetPages(userToken LoginResponse, issue LibraryData, endpoint string) AutoG
 	}
 
 	resp, _ := client.Do(req)
-	data, _ := ioutil.ReadAll(resp.Body)
+	data, _ := io.ReadAll(resp.Body)
 
-	responseType := AutoGenerated{}
+	responseType := IssueDetails{}
 
 	_ = json.Unmarshal([]byte(data), &responseType)
 
@@ -245,7 +343,7 @@ func GetInitialToken() (token string, err error) {
 		return "", err
 	}
 
-	data, _ := ioutil.ReadAll(page.Body)
+	data, _ := io.ReadAll(page.Body)
 
 	re := regexp.MustCompile(`"(jwt)":"((\\"|[^"])*)"`)
 
@@ -268,7 +366,7 @@ func GetLoginToken(username string, password string, fingerprint string) LoginRe
 	//req.Header.Add("Authorization", initialToken)
 
 	resp, _ := client.Do(req)
-	data, _ := ioutil.ReadAll(resp.Body)
+	data, _ := io.ReadAll(resp.Body)
 	//fmt.Println(string(data))
 
 	responseType := LoginResponse{}
@@ -298,11 +396,11 @@ func GetLibrary(userToken LoginResponse, endpoint string) []LibraryResponse {
 	var itemsToReturn []LibraryResponse
 	issuesToFetch := 120
 
-	pageToFetch := 1
+	pageToFetch := 0
 	for {
 		fmt.Println("Fetching page:" + strconv.Itoa(pageToFetch))
 
-		req, _ := http.NewRequest("GET", "https://zinio.com/api/newsstand/newsstands/101/users/"+userToken.Data.User.UserIDString+"/library_issues?limit="+strconv.Itoa(issuesToFetch)+"&page="+strconv.Itoa(pageToFetch), nil)
+		req, _ := http.NewRequest("GET", "https://zinio.com/api/newsstand/newsstands/101/users/"+userToken.Data.User.UserIDString+"/library-issues?limit="+strconv.Itoa(issuesToFetch)+"&offset="+strconv.Itoa(pageToFetch), nil)
 
 		req.Header.Add("Content-Type", "application/json")
 		for _, cookie := range userToken.Data.Cookies {
@@ -318,7 +416,7 @@ func GetLibrary(userToken LoginResponse, endpoint string) []LibraryResponse {
 			fmt.Println("Unable to get Library: " + err.Error())
 		}
 
-		data, _ := ioutil.ReadAll(resp.Body)
+		data, _ := io.ReadAll(resp.Body)
 		fmt.Println(string(data))
 
 		responseType := LibraryResponse{}
@@ -327,7 +425,7 @@ func GetLibrary(userToken LoginResponse, endpoint string) []LibraryResponse {
 
 		if len(responseType.Data) > 0 {
 			itemsToReturn = append(itemsToReturn, responseType)
-			pageToFetch++
+			pageToFetch += issuesToFetch
 		} else {
 			break
 		}
@@ -417,7 +515,6 @@ func GetDefaultTemplate() string {
 		margin-left:auto;
 	}
 
-
 	}
 	</style>-->
 	<style>
@@ -434,7 +531,7 @@ func GetDefaultTemplate() string {
 	</style>
 	</head>
 	<body>
-	<object type="image/svg+xml" data="SVG_PATH</object>
+	<object type="image/svg+xml" data="SVG_PATH"></object>
 
 	<script>
 		window.onload = fixpage;
@@ -452,7 +549,6 @@ func GetDefaultTemplate() string {
 	}
 	</script>
 	</body>
-
 
 	</html>`
 }
