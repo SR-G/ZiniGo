@@ -139,8 +139,8 @@ func isNotEncrypted(err error) bool {
    Main
    ──────────────────────────────────────────────────────────────────── */
 
-//go:generate go run github.com/SR-G/argweave/cmd/weavedoc -type=parameters -file=zinigo.go -edit=README.md
-//go:generate go run github.com/SR-G/argweave/cmd/weavehelp -type=parameters -file=zinigo.go -name=ZiniGo -edit=README.md -code-block=false
+//go:generate go run github.com/SR-G/argweave/cmd/weavedoc -type=parameters -file=zinigo.go -edit=README.md  -fields=long,short,positional,required,default,description -marker=weavedoc
+//go:generate go run github.com/SR-G/argweave/cmd/weavehelp -type=parameters -file=zinigo.go -name=ZiniGo -edit=README.md -code-block=true
 type parameters struct {
 	Unlimited       bool   `arg:"long=unlimited,env=ZINIGO_UNLIMITED,help=Use Zinio Unlimited"`
 	Email           string `arg:"short=u,long=email,env=ZINIGO_EMAIL,required,help=Zinio email"`

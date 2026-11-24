@@ -4,14 +4,31 @@ A tool written in Go for saving (legally purchased) magazines from Zinio as DRM-
 
 ## Precompiled binaries
 
-ZiniGo can be downloaded for Windows and Linux at https://github.com/TheAxeDude/ZiniGo/tree/master/built
+Download the latest precompiled binaries for Windows, Linux, and macOS from the [GitHub Releases](https://github.com/SR-G/ZiniGo/releases) page.
 
 ## Usage
 
 ./zinigo -u=Username -p=Password
 ./zinigo --email=Username --password=Password
 
-Options can also be set with `ZINIGO_*` environment variables or a JSON/TOML config file. Pass `--config=/path/to/config.json` to select a file explicitly; otherwise ZiniGo looks for a config file named after the executable in the working directory.
+Options can also be set with `ZINIGO_*` environment variables or a JSON/TOML config file. Pass `--config /path/to/config.json` to select a file explicitly; otherwise ZiniGo looks for a config file named after the executable in the working directory.
+
+Example of output : 
+
+```bash
+🔐 Logging in...
+📚 Fetching library...
+✓ Found 70 issues
+
+[1/70] XXX - December 2026 OK (102 pages)
+[2/70] XXX - November 2026 OK (exists)
+[3/70] XXX - October 2026 OK (exists)
+(...)
+[70/70] XXX - August 2021 OK (exists)
+
+==================================================
+Summary: 70 OK  0 ERR
+```
 
 ## Parameters
 
@@ -37,6 +54,7 @@ Options can also be set with `ZINIGO_*` environment variables or a JSON/TOML con
 ## Help
 
 <!-- weavehelp:start -->
+```bash
 ZiniGo
 
 USAGE:
@@ -61,24 +79,36 @@ OPTIONS:
     -V, --version                    Print version information
     -c, --config <PATH>              Path to a JSON or TOML config file (auto-detected from the binary name if omitted)
         --print-config               Print the resolved configuration as JSON
+```
 <!-- weavehelp:end -->
-
-You can use `-playwright=true` to use Playwright to run the tests. It'll download a browser in the background.
 
 ## Requirements
 
-No specific dependencies need to be installed, however a Chrome/Chromium executable is required to render pages to PDF.
-
-If using a pre-installed Chrome, the command `google-chrome` should work.
+No browser is required. Install `qpdf` and `awk` only if you use `--stripmenus`.
 
 ## How it works
-ZiniGo logs into Zinio, and pulls a list of all issues purchased. 
+ZiniGo logs into Zinio and retrieves your library of issues.
 
-Each page is available as an SVG, which is then injected into an HTML page (based on template.html).
+It downloads and decrypts the issue pages as PDFs, then combines them into one PDF per issue. The optional `--stripmenus` feature uses `qpdf` and `awk` to remove the small TL badge.
 
-PlayWright (or google-chrome) is then used to print the page to PDF, and all pages are combined into a single PDF.
+## DEV
 
-## Building
-Build for linux & windows on windows using the powershell script in buildscripts
-Build for linux & windows on macos using the darwin.sh script in buildscripts
+### Building
 
+Building from source requires Go 1.27.1 or newer.
+
+- `make build` builds `bin/zinigo` for the current platform.
+- `make test` runs the Go tests.
+- `make distribution` builds binaries for Windows, Linux, and macOS in `distribution/`.
+
+### Release
+
+Pushing a `v`-prefixed tag triggers the release workflow:
+
+```bash
+VERSION="0.1.0"
+git switch master
+git pull --ff-only origin master
+git tag -a "v${VERSION}" -m "Release v${VERSION}"
+git push origin "v${VERSION}"
+```
