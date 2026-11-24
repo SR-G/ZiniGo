@@ -1,2 +1,8 @@
-/issue/
-/ZiniGo/pkg/
+bin/
+build/
+debug/
+distribution/
+issue/
+issues/
+*.log
+*.tmp
