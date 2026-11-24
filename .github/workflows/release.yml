@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  changelog:
+    name: Changelog
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    outputs:
+      skipped: ${{ steps.changelog.outputs.skipped }}
+      tag: ${{ steps.changelog.outputs.tag }}
+      clean_changelog: ${{ steps.changelog.outputs.clean_changelog }}
+      version: ${{ steps.changelog.outputs.version }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Conventional Changelog Action
+        id: changelog
+        uses: TriPSs/conventional-changelog-action@v6
+        with:
+          preset: "conventionalcommits"
+          tag-prefix: 'v'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          skip-git-pull: "true"
+          skip-version-file: "true"
+
+  release:
+    name: Build and Publish Release (binaries and docker image)
+    runs-on: ubuntu-latest
+    # if: ${{ needs.changelog.outputs.skipped == 'false' }}
+    needs: [ changelog ]
+    permissions:
+      contents: write    
+      packages: write
+
+    steps:
+      - name: Get repository name
+        id: get_repo
+        env:
+          REPOSITORY_NAME: ${{ github.event.repository.name }}
+        run: |
+          REPO_NAME="$(printf '%s' "$REPOSITORY_NAME" | tr '[:upper:]' '[:lower:]')"
+          echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go modules
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ${{ env.GOMODCACHE }}
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build all binary
+        run: |
+          make distribution
+
+      - name: Login to GHCR.IO
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Extract version parts
+        id: extract_version
+        env:
+          RELEASE_VERSION: ${{ needs.changelog.outputs.version }}
+        run: |
+          VERSION="${RELEASE_VERSION#v}"
+          MAJOR_MINOR=$(printf '%s' "$VERSION" | cut -d'-' -f1 | cut -d'.' -f1,2)
+          echo "MAJOR_MINOR_TAG=${MAJOR_MINOR}.x" >> $GITHUB_ENV
+
+      - name: Setup Docker Metadata
+        uses: docker/metadata-action@v6
+        id: meta
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest # ,index
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.REPO_NAME }}
+          tags: |
+            latest
+            ${{ needs.changelog.outputs.version }}
+            ${{ env.MAJOR_MINOR_TAG }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v7
+        # env:
+        #   BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+              VERSION=${{ needs.changelog.outputs.version }}
+          platforms: linux/amd64
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: false # Disable provenance to avoid unknown/unknown
+          sbom: false       # Disable sbom to avoid unknown/unknown
+
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            distribution/zinigo-windows-amd64
+            distribution/zinigo-linux-amd64
+            distribution/zinigo-linux-arm64
+            distribution/zinigo-darwin-amd64
+            distribution/zinigo-darwin-arm64
+          body: |
+            <details>
+              <summary>Release ${{ github.ref_name }} of ZiniGo.</summary>
+              ${{ needs.changelog.outputs.clean_changelog }}
+            </details>
+          draft: false
+          prerelease: false
+          overwrite_files: true
+          generate_release_notes: true
+
